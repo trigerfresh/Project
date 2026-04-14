@@ -1,0 +1,127 @@
+middleware -> auth.js
+import jwt from 'jsonwebtoken'
+
+export const verifyToken = (req, res, next) => {
+  const token = req.headers['authorization']
+
+  if (!token) return res.status(403).json('No Token')
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET)
+    req.user = decoded
+    next()
+  } catch {
+    res.status(401).json('Invalid token')
+  }
+}
+
+export const authorizeRole = (roles) => {
+  return (req, res, next) => {
+    if (!roles.includes(req.user.role)) {
+      return res.status(403).json('Access denied')
+    }
+    next()
+  }
+}
+====================
+utility -> jwt.js
+import jwt from 'jsonwebtoken'
+
+const generateToken = (user) => {
+  return jwt.sign({ id: user.Id, role: user.role }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN,
+  })
+}
+
+module.exports = { generateToken }
+===============================
+server.js
+import express from 'express'
+import cors from 'cors'
+import dotenv from 'dotenv'
+import { verifyToken, authorizeRole } from './middleware/auth.js'
+
+const app = express()
+
+app.use(cors())
+app.use(express.json())
+const PORT = 5000
+
+app.get('/admin', verifyToken, authorizeRole(['admin']), (req, res) => {
+  res.json('Welcome Admin.')
+})
+
+app.listen(PORT, () => {
+  console.log(`Server running at @ ${PORT}`)
+})
+==========================
+routes -> auth.js
+import express from 'express'
+import bcrypt from 'bcryptjs'
+import sql from 'mssql'
+import { generateToken } from '../utility/jwt.js'
+
+const router = express.Router()
+
+router.post('/signup', async (req, res) => {
+  const { name, email, password, role } = req.body
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10)
+    const pool = await sql.connect()
+
+    await pool
+      .request()
+      .input('name', sql.NVarChar, name)
+      .input('email', sql.NVarChar, email)
+      .input('password', sql.NVarChar, hashedPassword)
+      .input('role', sql.NVarChar, role)
+      .query(`INSERT INTO Users(Name, Email, PasswordHash, Role)
+        VALUES(@name, @email, @password, @role)`)
+
+    res.json({ message: 'User created' })
+  } catch (err) {
+    res.status(500).json(err.message)
+  }
+})
+
+router.post('/login', async (req, res) => {
+  const { email, password } = req.body
+
+  try {
+    const pool = await sql.connect()
+
+    const result = await pool
+      .request()
+      .input('email', sql.NVarChar, email)
+      .query('SELECT * FROM Users WHERE Email = @email')
+
+    const user = result.recordSet[0]
+    if (!user) return res.status(404).json('User not found')
+
+    const isMatch = await bcrypt.compare(password, user.hashedPassword)
+    if (!isMatch) return res.status(400).json('Invalid credentials')
+    const token = generateToken(user)
+    res.json({ token, role: user.token })
+  } catch (err) {
+    res.status(500).json(err.message)
+  }
+})
+================================
+config -> db.js
+import sql from 'mssql'
+import dotenv from 'dotenv'
+
+dotenv.config()
+
+const config = {
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  server: process.env.DB_SERVER,
+  database: process.env.DB_NAME,
+  options: {
+    encrypt: false,
+    trustServerCertificate: true,
+  },
+}
+
+module.exports = sql.connect(config)
